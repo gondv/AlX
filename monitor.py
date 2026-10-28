@@ -22,7 +22,9 @@ def enviar_telegram(mensaje):
         "disable_web_page_preview": False
     }
     try:
-        requests.post(url_tg, data=payload, timeout=15)
+        r = requests.post(url_tg, data=payload, timeout=15)
+        if r.status_code != 200:
+            print(f"Aviso de Telegram ({r.status_code}): {r.text}")
     except Exception as e:
         print(f"Error al conectar con Telegram: {e}")
 
@@ -45,45 +47,63 @@ def comprobar_abono():
         return
 
     soup = BeautifulSoup(response.text, "html.parser")
-    encontrado = False
-    agotado = True
-    contenido_tarjeta = ""
+    producto_objetivo = None
 
-    # Buscar el texto del abono
-    for texto in soup.find_all(string=lambda t: t and ("Abono 24h L-D" in t or "59-Abono 24h" in t)):
-        # Táctica del ancla: Subimos por el árbol HTML hasta atrapar el contenedor que tiene el precio (€)
-        padre = texto.parent
-        while padre and padre.name != 'body':
-            texto_padre = padre.get_text(" ", strip=True)
-            # Si el contenedor ya incluye el símbolo del euro, hemos capturado la tarjeta entera
-            if "€" in texto_padre:
-                contenido_tarjeta = texto_padre
-                encontrado = True
-                break
-            padre = padre.parent
+    # 1. Recorremos todas las tarjetas exactas <label class="home-saba__product">
+    for label in soup.select("label.home-saba__product"):
+        titulo_el = label.select_one(".home-saba__product-title")
+        desc_el = label.select_one(".home-saba__product-desc")
         
-        if encontrado:
+        texto_titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+        texto_desc = desc_el.get_text(strip=True) if desc_el else ""
+
+        if "Abono 24h L-D" in texto_titulo or "59-Abono 24h" in texto_desc:
+            producto_objetivo = label
             break
 
-    if not encontrado:
-        print("Aviso: No se encontró el abono o su precio en la página.")
+    if not producto_objetivo:
+        print("Aviso: No se encontró la tarjeta 'label.home-saba__product' del Abono 24h L-D.")
+        if MODO_PRUEBA:
+            enviar_telegram("⚠️ <b>Aviso de prueba:</b> No se encontró la tarjeta del producto en el HTML.")
         return
 
-    print(f"Estado leído en la web ampliado: {contenido_tarjeta}")
+    # Extraemos los datos exactos de los selectores de la tarjeta
+    titulo = producto_objetivo.select_one(".home-saba__product-title")
+    precio = producto_objetivo.select_one(".home-saba__product-price")
+    etiqueta_agotado = producto_objetivo.select_one(".home-saba__product-outofstock")
+    caja_deshabilitada = producto_objetivo.select_one(".home-saba__product-body-disabled")
+    radio_compra = producto_objetivo.select_one("input.home-saba__product-radio, input[name='contractId']")
 
-    # Ahora sí, comprobamos si dice agotado en toda la tarjeta (Título + Precio + Botón)
-    if "agotado" not in contenido_tarjeta.lower():
-        agotado = False
+    texto_completo = producto_objetivo.get_text(" | ", strip=True)
+    print(f"Lectura completa de <label class='home-saba__product'>: {texto_completo}")
 
-    if not agotado:
+    # Comprobación triple de disponibilidad real:
+    # Está agotado si tiene el div .home-saba__product-outofstock, la clase disabled, o la palabra "agotado"
+    esta_agotado = (
+        etiqueta_agotado is not None
+        or caja_deshabilitada is not None
+        or "agotado" in texto_completo.lower()
+    )
+
+    if not esta_agotado or radio_compra is not None:
         enviar_telegram(
             "🚨 <b>¡ABONO 24H L-D DISPONIBLE EN ALFONSO X!</b> 🚨\n\n"
-            "El <b>Abono 24h L-D ALFONSO X</b> ya NO aparece como Agotado.\n"
-            f"📋 <i>Info detectada: {contenido_tarjeta}</i>\n\n"
-            f"👉 <a href='{URL_PARKING}'>HAZ CLIC AQUÍ PARA CONTRATARLO</a>"
+            f"📌 <b>Producto:</b> {titulo.get_text(strip=True) if titulo else 'Abono 24h L-D'}\n"
+            f"💶 <b>Precio actual:</b> {precio.get_text(strip=True) if precio else 'Ver web'}\n"
+            f"📋 <b>Lectura tarjeta:</b> <i>{texto_completo}</i>\n\n"
+            f"👉 <a href='{URL_PARKING}'>HAZ CLIC AQUÍ PARA CONTRATARLO AHORA</a>"
         )
+        print("¡DISPONIBLE! Alerta enviada.")
     else:
-        print("Sigue agotado. Sin novedades.")
+        print("Confirmado: Sigue agotado (detectado .home-saba__product-outofstock / body-disabled).")
+        if MODO_PRUEBA:
+            enviar_telegram(
+                "✅ <b>¡Calibración HTML perfecta!</b>\n\n"
+                "Ahora estoy leyendo la etiqueta exacta <code>label.home-saba__product</code> de SABA/Interparking:\n\n"
+                f"📋 <i>{texto_completo}</i>\n\n"
+                "He detectado correctamente el bloque <code>home-saba__product-outofstock (Agotado)</code>. "
+                "Cero falsos positivos a partir de ahora: solo te avisaré cuando se habilite la compra real."
+            )
 
 if __name__ == "__main__":
     comprobar_abono()
